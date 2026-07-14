@@ -23,14 +23,14 @@ def _resolve_output_path(onnx_model_path: str, output_path: str = None,
 
 def _convert_keras(model_proto, onnx_model_path, output_path,
                    native_groupconv, weight_quant, fp16_model, int8_model,
-                   calibration_data, target_formats):
+                   calibration_data, target_formats, float_output=False):
     """ONNX → Keras → TFLite (original two-stage path)."""
     keras_model, input_layout, output_layout = keras_builder(model_proto, native_groupconv)
 
     tflite_bytes = None
     if 'tflite' in target_formats:
         tflite_bytes = tflite_builder(keras_model, weight_quant, fp16_model,
-                                      int8_model, calibration_data)
+                                      int8_model, calibration_data, float_output)
 
     out_base = _resolve_output_path(onnx_model_path, output_path, fp16_model, int8_model)
 
@@ -101,7 +101,8 @@ def onnx_converter(onnx_model_path: str, output_path: str = None,
                    native_groupconv: bool = False,
                    use_direct_ir: bool = False,
                    weight_quant: bool = False, fp16_model: bool = False,
-                   int8_model: bool = False, calibration_data: list = None) -> dict:
+                   int8_model: bool = False, calibration_data: list = None,
+                   float_output: bool = False) -> dict:
     """Convert ONNX model to TFLite (and optionally Keras .h5).
 
     Two backends available:
@@ -110,6 +111,14 @@ def onnx_converter(onnx_model_path: str, output_path: str = None,
 
     For INT8 quantization, use calibration_data (list of .npy file paths,
     one per model input). Data should already be preprocessed before saving.
+
+    float_output: only applies when int8_model=True. Keeps the internal
+    graph fully int8 (NPU-friendly) but appends a native DEQUANTIZE op
+    after the last op, so the .tflite file's output tensor is declared
+    float32 and any runtime reading tensor metadata straight from the
+    model (e.g. Axis's larod) hands back real float values with no
+    manual scale/zero_point dequantization needed downstream. Ignored
+    when use_direct_ir=True (the direct IR backend doesn't do PTQ).
 
     Returns dict with keys: tflite (file path), tflite_error (max element error),
     and for Keras path: keras (file path), keras_error.
@@ -132,4 +141,5 @@ def onnx_converter(onnx_model_path: str, output_path: str = None,
 
     return _convert_keras(model_proto, onnx_model_path, output_path,
                           native_groupconv, weight_quant, fp16_model,
-                          int8_model, calibration_data, target_formats)
+                          int8_model, calibration_data, target_formats,
+                          float_output)

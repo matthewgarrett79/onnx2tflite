@@ -78,7 +78,17 @@ def keras_builder(onnx_model, native_groupconv:bool=False):
     return keras_model, input_layout, output_layout
 
 def tflite_builder(keras_model, weight_quant: bool = False, fp16_model: bool = False,
-                   int8_model: bool = False, calibration_data: list = None):
+                   int8_model: bool = False, calibration_data: list = None,
+                   float_output: bool = False):
+    """
+    float_output: only meaningful when int8_model=True. The internal graph
+    stays fully int8/NPU-friendly, but the converter appends a native
+    DEQUANTIZE op after the last op and declares the model's output
+    tensor(s) as float32 in the .tflite flatbuffer itself -- so runtimes
+    that read tensor metadata straight from the model (e.g. Axis's larod)
+    hand back real float values with no manual scale/zero_point math
+    needed downstream. Input quantization (uint8) is unaffected.
+    """
     converter = tf.lite.TFLiteConverter.from_keras_model(keras_model)
     converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS, tf.lite.OpsSet.SELECT_TF_OPS]
     if weight_quant or int8_model or fp16_model:
@@ -99,7 +109,7 @@ def tflite_builder(keras_model, weight_quant: bool = False, fp16_model: bool = F
         converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS_INT8, tf.lite.OpsSet.SELECT_TF_OPS]
         converter.target_spec.supported_types = []
         converter.inference_input_type = tf.uint8
-        converter.inference_output_type = tf.uint8
+        converter.inference_output_type = tf.float32 if float_output else tf.uint8
         converter.experimental_new_converter = True
 
     tflite_model = converter.convert()
