@@ -55,5 +55,5 @@ np2tf_type = {
 }
 
 FORCE_CHANNEL_LAST_OP = ["Conv", "ConvTranspose", "DepthToSpace", "Pad", "AveragePool", "MaxPool", "Upsample", "Resize", "Gemm"]
-FORCE_CHANNEL_FIRST_OP = ["Reshape", "Transpose", "ScatterND", "MatMul"]
+FORCE_CHANNEL_FIRST_OP = ["Transpose", "ScatterND", "MatMul"]
 

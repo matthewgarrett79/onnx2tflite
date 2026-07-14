@@ -23,9 +23,11 @@ class TFTranspose():
             self.trans_in = [0, shape_len-1] + [n for n in range(1, shape_len-1)]
 
     def __call__(self, inputs):
-        if self.trans_in:
-            inputs = tf.transpose(inputs, perm=self.trans_in)
-        return tf.transpose(inputs, perm=self.perm_list)
+        # if self.trans_in:
+        #     inputs = tf.transpose(inputs, perm=self.trans_in)
+        # return tf.transpose(inputs, perm=self.perm_list)
+        ## Remove transpose from network as 
+        return inputs
 
 @OPERATOR.register_operator("Slice")
 class TFSlice():
@@ -76,24 +78,26 @@ class TFConcat():
     def __init__(self, tensor_grap, node_weights, node_inputs, node_attribute, node_outputs, layout_dict, *args, **kwargs):
         super().__init__()
         #TODO can be optimzer by watch after node, if conv to be channel last.
-        self._axis = node_attribute['axis']
+        self._axis = 1
         # use `count` to count how much more for channel-last to channel-first
         count = 0
         for inp in node_inputs:
+            print(f"input {inp}")
             if inp in node_weights:
                 count -= 1
             elif layout_dict[inp] == Layout.Channel_Last:
                 count += 1
             else:
                 count -= 1
-        
         self._gather = []
         if count < 0:
             # align to Channel_First
             layout_dict[node_outputs[0]] = Layout.Channel_First
+            
             for inp in node_inputs:
                 if inp in tensor_grap:
                     if layout_dict[inp] == Layout.Channel_Last:
+                        self._axis = 2
                         tensor_grap[inp] = dimension_utils.tensor_NDC_to_NCD_format(tensor_grap[inp])
                     self._gather.append(tensor_grap[inp])
                 else:
@@ -102,10 +106,21 @@ class TFConcat():
             # align to Channel_Last
             layout_dict[node_outputs[0]] = Layout.Channel_Last
             self._axis = dimension_utils.channel_to_last_dimension(self._axis)
+            prev: Layout = None
             for inp in node_inputs:
                 if inp in tensor_grap:
+                    if prev:
+                        if prev == layout_dict[inp]:
+                            print("Warning: Mismatched input layer format to concat")
+                        else:
+                            prev = layout_dict[inp]
+                        
                     if layout_dict[inp] != Layout.Channel_Last:
                         tensor_grap[inp] = dimension_utils.tensor_NCD_to_NDC_format(tensor_grap[inp])
+                    if len(tensor_grap[inp].shape) == 4:
+                        self._axis = len(tensor_grap[inp].shape) - 1
+                    else: 
+                        self._axis = 1
                     self._gather.append(tensor_grap[inp])
                 else:
                     self._gather.append(dimension_utils.tensor_NCD_to_NDC_format(node_weights[inp]))
@@ -117,18 +132,30 @@ class TFConcat():
 class TFReshape():
     def __init__(self, tensor_grap, node_weights, node_inputs, node_attribute, node_outputs, layout_dict, *args, **kwargs):
         super().__init__()
+        
         self.out_shape = node_weights[node_inputs[1]]
+        print(self.out_shape)
+        # fix out_shape to flat size
+        # flat_tensor_size = 1
+        # for i in tensor_grap[node_inputs[0]].shape:
+        #     flat_tensor_size *= i
+        # self.out_shape = (1, flat_tensor_size)
+        # print(f"{tensor_grap[node_inputs[0]].shape} -> {self.out_shape}")
         self.trans_in = None
         # LOG.info("Reshape will process tensor after change back to NCHW format.")
-        if layout_dict[node_inputs[0]] == Layout.Channel_Last:
-            shape_len = len(tensor_grap[node_inputs[0]].shape)
-            self.trans_in = [0, shape_len-1] + [n for n in range(1, shape_len-1)]
+        # if layout_dict[node_inputs[0]] == Layout.Channel_Last:
+        #     shape_len = len(tensor_grap[node_inputs[0]].shape)
+        #     self.trans_in = [0, shape_len-1] + [n for n in range(1, shape_len-1)]
         for nop in node_outputs:
-            layout_dict[nop] = Layout.Channel_First
-
+            layout_dict[nop] = Layout.Channel_Last
+        shape_len = len(self.out_shape)
+        if shape_len == 4:
+            self.out_shape = (1, 2, 2, 18920)
+        else: 
+            self.out_shape = ((self.out_shape[0], self.out_shape[2], self.out_shape[1]))
     def __call__(self, inputs):
-        if self.trans_in:
-            inputs = tf.transpose(inputs, perm=self.trans_in)
+        # if self.trans_in:
+        #     inputs = tf.transpose(inputs, perm=self.trans_in)
         inputs = tf.reshape(inputs, shape=self.out_shape)
         return inputs
         

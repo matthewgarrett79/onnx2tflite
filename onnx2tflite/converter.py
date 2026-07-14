@@ -4,6 +4,7 @@ import logging
 from .onnx_loader import load_onnx_modelproto
 from .output_check import get_elements_error, check_tflite_error
 from .keras_backend.builder import keras_builder, tflite_builder
+from .utils.relu_concat_fix import push_relu_before_concat
 
 logging.basicConfig(level=logging.INFO)
 LOG = logging.getLogger("converter:")
@@ -115,6 +116,16 @@ def onnx_converter(onnx_model_path: str, output_path: str = None,
     """
     model_proto = load_onnx_modelproto(onnx_model_path, input_node_names,
                                        output_node_names, need_simplify)
+
+    # Rewrite any Relu(Concat(...)) into Concat(Relu(...), ...) so each
+    # branch's Relu becomes fusable into its own producer (usually a Conv2D)
+    # during INT8 quantization, instead of surviving as a standalone
+    # Activation layer with its own independently-calibrated (and typically
+    # mismatched-scale) quantization -- which is what Ethos-N NPU backends
+    # reject with "Layer of type Activation is not supported ... falling
+    # back to the next backend". See utils/relu_concat_fix.py for details.
+    if int8_model:
+        push_relu_before_concat(model_proto)
 
     if use_direct_ir:
         return _convert_direct(model_proto, onnx_model_path, output_path)
