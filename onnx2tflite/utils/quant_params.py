@@ -62,18 +62,36 @@ def _ordered_output_details(interp):
     original output-tuple order (== ONNX graph.output order), using the
     ':N' name suffix as the authoritative position, with the SignatureDef
     runner used when available for a cleaner name-to-tensor mapping."""
-    sig_list = interp.get_signature_list()
+    sig_list = None
+    try:
+        sig_list = interp.get_signature_list()
+    except Exception as e:
+        # Older TF/TFLite runtimes (pre ~2.5) don't expose
+        # get_signature_list()/get_signature_runner() at all, and some
+        # interpreter builds raise rather than return {} when a model has
+        # no embedded SignatureDef. Either way, fall through to the plain
+        # get_output_details() path below instead of aborting the whole
+        # export.
+        LOG.warning(f"interp.get_signature_list() unavailable/failed "
+                    f"({type(e).__name__}: {e}); falling back to plain "
+                    f"get_output_details() order.")
+
     if sig_list:
-        sig_key = "serving_default" if "serving_default" in sig_list else next(iter(sig_list))
-        runner = interp.get_signature_runner(sig_key)
-        details_by_sig_name = runner.get_output_details()
-        items = list(details_by_sig_name.items())
-        if all(_suffix_index(d.get("name", "")) is not None for _, d in items):
-            items.sort(key=lambda kv: _suffix_index(kv[1]["name"]))
-        else:
-            LOG.warning("Signature output tensor names lack a ':N' suffix; "
-                        "falling back to signature dict order (unverified).")
-        return [d for _, d in items]
+        try:
+            sig_key = "serving_default" if "serving_default" in sig_list else next(iter(sig_list))
+            runner = interp.get_signature_runner(sig_key)
+            details_by_sig_name = runner.get_output_details()
+            items = list(details_by_sig_name.items())
+            if all(_suffix_index(d.get("name", "")) is not None for _, d in items):
+                items.sort(key=lambda kv: _suffix_index(kv[1]["name"]))
+            else:
+                LOG.warning("Signature output tensor names lack a ':N' suffix; "
+                            "falling back to signature dict order (unverified).")
+            return [d for _, d in items]
+        except Exception as e:
+            LOG.warning(f"Signature-based output ordering failed "
+                        f"({type(e).__name__}: {e}); falling back to plain "
+                        f"get_output_details() order.")
 
     # No SignatureDef in the flatbuffer (e.g. an older/direct-IR-built
     # model) -- fall back to the plain output details list.

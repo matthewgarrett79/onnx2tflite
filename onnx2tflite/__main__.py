@@ -13,6 +13,7 @@ def parse_opt():
     parser.add_argument('--fp16', default=False, action='store_true', help='fp16 quant, include input output')
     parser.add_argument('--int8', default=False, action='store_true', help='int8 quant, include input output')
     parser.add_argument('--calibration-data', nargs='+', default=None, help='.npy file paths for INT8 calibration (one per model input, data must be preprocessed)')
+    parser.add_argument('--float-output', default=False, action='store_true', help='with --int8: keep the internal graph int8 but append a native DEQUANTIZE op so the model output tensor(s) are float32 (e.g. for larod consumers that read tensor dtype from the model itself)')
     parser.add_argument('--formats', nargs='+', default=['keras', 'tflite'], help='available formats are (h5, tflite)')
     opt = parser.parse_args()
     return opt
@@ -30,7 +31,8 @@ def run():
         weight_quant=opt.weigthquant,
         fp16_model=opt.fp16,
         int8_model=opt.int8,
-        calibration_data=opt.calibration_data
+        calibration_data=opt.calibration_data,
+        float_output=opt.float_output
     )
 
 if __name__ == "__main__":

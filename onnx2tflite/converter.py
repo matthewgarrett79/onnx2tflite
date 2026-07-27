@@ -1,5 +1,6 @@
 import os
 import logging
+import traceback
 
 from .onnx_loader import load_onnx_modelproto
 from .output_check import get_elements_error, check_tflite_error
@@ -60,9 +61,10 @@ def _convert_keras(model_proto, onnx_model_path, output_path,
                 result["quant_params"] = export_output_dequant_params(
                     model_proto, tflite_bytes, quant_json_path)
                 result["quant_params_path"] = quant_json_path
-            except Exception as e:
-                LOG.warning(f"Could not export output dequant params: "
-                            f"{type(e).__name__}: {e}")
+            except Exception:
+                LOG.warning("Could not export output dequant params "
+                           "(.quant.json was NOT written) -- full traceback:\n"
+                           + traceback.format_exc())
         return result
 
     try:
