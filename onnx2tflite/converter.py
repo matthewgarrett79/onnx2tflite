@@ -5,6 +5,7 @@ from .onnx_loader import load_onnx_modelproto
 from .output_check import get_elements_error, check_tflite_error
 from .keras_backend.builder import keras_builder, tflite_builder
 from .utils.relu_concat_fix import push_relu_before_concat
+from .utils.quant_params import export_output_dequant_params
 
 logging.basicConfig(level=logging.INFO)
 LOG = logging.getLogger("converter:")
@@ -48,7 +49,20 @@ def _convert_keras(model_proto, onnx_model_path, output_path,
 
     result = {"keras": keras_path, "tflite": tflite_path,
               "keras_error": 0, "tflite_error": 0}
+
     if int8_model:
+        if tflite_bytes is not None:
+            # Sidecar JSON of per-output dequant params, keyed by the
+            # ORIGINAL ONNX output name -- see utils/quant_params.py for
+            # why naive output-tensor-list order can't be trusted here.
+            quant_json_path = out_base + ".quant.json"
+            try:
+                result["quant_params"] = export_output_dequant_params(
+                    model_proto, tflite_bytes, quant_json_path)
+                result["quant_params_path"] = quant_json_path
+            except Exception as e:
+                LOG.warning(f"Could not export output dequant params: "
+                            f"{type(e).__name__}: {e}")
         return result
 
     try:
