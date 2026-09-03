@@ -25,9 +25,11 @@ def _resolve_output_path(onnx_model_path: str, output_path: str = None,
 
 def _convert_keras(model_proto, onnx_model_path, output_path,
                    native_groupconv, weight_quant, fp16_model, int8_model,
-                   calibration_data, target_formats, float_output=False):
+                   calibration_data, target_formats, float_output=False,
+                   no_transpose=False):
     """ONNX → Keras → TFLite (original two-stage path)."""
-    keras_model, input_layout, output_layout = keras_builder(model_proto, native_groupconv)
+    keras_model, input_layout, output_layout = keras_builder(model_proto, native_groupconv,
+                                                             no_transpose)
 
     tflite_bytes = None
     if 'tflite' in target_formats:
@@ -118,7 +120,8 @@ def onnx_converter(onnx_model_path: str, output_path: str = None,
                    use_direct_ir: bool = False,
                    weight_quant: bool = False, fp16_model: bool = False,
                    int8_model: bool = False, calibration_data: list = None,
-                   float_output: bool = False) -> dict:
+                   float_output: bool = False,
+                   no_transpose: bool = False) -> dict:
     """Convert ONNX model to TFLite (and optionally Keras .h5).
 
     Two backends available:
@@ -135,6 +138,16 @@ def onnx_converter(onnx_model_path: str, output_path: str = None,
     model (e.g. Axis's larod) hands back real float values with no
     manual scale/zero_point dequantization needed downstream. Ignored
     when use_direct_ir=True (the direct IR backend doesn't do PTQ).
+
+    no_transpose: the Axis/larod profile. larod's DLPU has no Transpose op, so
+    with this set the converter never emits one: a Transpose that merely
+    expresses NCHW<->NHWC is elided as a layout relabel, and Reshape/Concat
+    express their (channel-first) ONNX shapes and axes in channel-last terms
+    instead. A Transpose that genuinely reorders data cannot be elided and
+    raises NotImplementedError naming the node, rather than silently
+    converting to a graph that computes the wrong thing -- if that fires, the
+    permutation has to be removed upstream in the ONNX export. Ignored when
+    use_direct_ir=True.
 
     Returns dict with keys: tflite (file path), tflite_error (max element error),
     and for Keras path: keras (file path), keras_error.
@@ -158,4 +171,4 @@ def onnx_converter(onnx_model_path: str, output_path: str = None,
     return _convert_keras(model_proto, onnx_model_path, output_path,
                           native_groupconv, weight_quant, fp16_model,
                           int8_model, calibration_data, target_formats,
-                          float_output)
+                          float_output, no_transpose)

@@ -9,6 +9,7 @@ def parse_opt():
     parser.add_argument('--output-node-names', nargs="+", default=None, help='which outputs is you want, support middle layers, None will using onnx orignal outputs')
     parser.add_argument('--nosimplify', default=False, action='store_true', help='do not simplify model')
     parser.add_argument("--native-groupconv", default=False, action='store_true', help='using native method for groupconv, only support for tflite version >= 2.9')
+    parser.add_argument("--no-transpose", default=False, action='store_true', help='Axis/larod profile: never emit a Transpose op (larod has none). Layout-only transposes are elided; a transpose that genuinely reorders data raises instead of silently converting wrong.')
     parser.add_argument('--weigthquant', default=False, action='store_true', help='weight only int8 quant')
     parser.add_argument('--fp16', default=False, action='store_true', help='fp16 quant, include input output')
     parser.add_argument('--int8', default=False, action='store_true', help='int8 quant, include input output')
@@ -28,6 +29,7 @@ def run():
         output_path = opt.outpath,
         target_formats = opt.formats,
         native_groupconv = opt.native_groupconv,
+        no_transpose = opt.no_transpose,
         weight_quant=opt.weigthquant,
         fp16_model=opt.fp16,
         int8_model=opt.int8,

@@ -11,10 +11,19 @@ from onnx2tflite.keras_backend.ops import convolution, activation, math, deforma
 from onnx2tflite.utils.definitions import *
 from onnx2tflite.utils.graph_tools import build_tf_inputs, decode_node_attribute
 
-def keras_builder(onnx_model, native_groupconv:bool=False):
+def keras_builder(onnx_model, native_groupconv:bool=False, no_transpose:bool=False):
 
     convolution.USE_NATIVE_GROUP_CONV = native_groupconv
-    
+    # Axis/larod profile: never emit a Transpose (the DLPU has no such op). See deformation.py's
+    # NO_TRANSPOSE for what that implies for Reshape/Concat axis handling.
+    deformation.NO_TRANSPOSE = no_transpose
+    if no_transpose and "Reshape" in FORCE_CHANNEL_FIRST_OP:
+        # Forcing Reshape channel-first would insert exactly the transpose we're trying to avoid; under
+        # this flag TFReshape permutes its target SHAPE instead and stays channel-last.
+        FORCE_CHANNEL_FIRST_OP.remove("Reshape")
+    elif not no_transpose and "Reshape" not in FORCE_CHANNEL_FIRST_OP:
+        FORCE_CHANNEL_FIRST_OP.append("Reshape")
+
     model_graph = onnx_model.graph
     layout_dict, tf_tensor = {}, {}
 

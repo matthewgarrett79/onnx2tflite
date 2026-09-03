@@ -55,5 +55,8 @@ np2tf_type = {
 }
 
 FORCE_CHANNEL_LAST_OP = ["Conv", "ConvTranspose", "DepthToSpace", "Pad", "AveragePool", "MaxPool", "Upsample", "Resize", "Gemm"]
-FORCE_CHANNEL_FIRST_OP = ["Transpose", "ScatterND", "MatMul"]
+# "Reshape" belongs here for the ordinary path (it wants NCHW semantics), but keras_builder() removes it
+# when no_transpose=True -- forcing it channel-first would insert the very Transpose the Axis/larod
+# profile has to avoid. Kept as a mutable list for that reason.
+FORCE_CHANNEL_FIRST_OP = ["Reshape", "Transpose", "ScatterND", "MatMul"]
 

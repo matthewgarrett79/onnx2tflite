@@ -6,28 +6,82 @@ from onnx2tflite.utils import OPERATOR, dimension_utils
 
 LOG = logging.getLogger("deformation_layers :")
 
+# Axis/larod profile. Set by keras_builder() from onnx_converter(no_transpose=...); OFF by default, so
+# upstream behaviour is unchanged unless a caller asks for it.
+#
+# larod's DLPU has no Transpose op, so under this flag a Transpose is only ever allowed to be a layout
+# RELABEL (elided, see TFTranspose) -- never a data movement. Reshape and Concat then have to express
+# their ONNX (channel-first) shapes/axes in channel-last terms themselves, since no physical transpose
+# is inserted to put the tensor back into NCHW for them.
+NO_TRANSPOSE = False
+
 @OPERATOR.register_operator("Transpose")
 class TFTranspose():
+    """ONNX Transpose.
+
+    With NO_TRANSPOSE set (the Axis/larod profile -- larod's DLPU has no Transpose op), a transpose is
+    never allowed to move data. That's sound for the only transposes a NCHW->NHWC conversion actually
+    needs: an ONNX graph in channel-first order gets its Conv outputs materialised channel-LAST by this
+    converter, so an ONNX `Transpose(0,2,3,1)` sitting after one is describing a permutation that has
+    ALREADY happened physically. It is pure bookkeeping, and eliding it is exact.
+
+    What is NOT safe is eliding a transpose that genuinely reorders data (e.g. swapping two spatial
+    axes). The previous revision returned `inputs` unconditionally, which silently produced a wrong
+    graph in that case; we now raise instead, naming the node, so the failure is a build error rather
+    than a model that converts cleanly and detects nothing.
+    """
     def __init__(self, tensor_grap, node_weights, node_inputs, node_attribute, node_outputs, layout_dict, *args, **kwargs)->None:
         super().__init__()
-        for nop in node_outputs:
-            layout_dict[nop] = Layout.Channel_First
+        self.trans_in, self.perm_list = None, None
+        self.elide = False
+
         if kwargs.get("perm_list"):
             self.perm_list = kwargs.get("perm_list")
+            for nop in node_outputs:
+                layout_dict[nop] = Layout.Channel_First
             return
-        self.trans_in = None
-        self.perm_list = [i for i in node_attribute['perm']]
-        if layout_dict[node_inputs[0]] == Layout.Channel_Last:
+
+        perm = [i for i in node_attribute['perm']]
+        rank = len(perm)
+        input_is_last = layout_dict[node_inputs[0]] == Layout.Channel_Last
+        # The two permutations that are nothing but a layout relabel.
+        nchw_to_nhwc = [0] + list(range(2, rank)) + [1]
+        nhwc_to_nchw = [0, rank - 1] + list(range(1, rank - 1))
+
+        if NO_TRANSPOSE:
+            if input_is_last and perm == nchw_to_nhwc:
+                # Data is already channel-last; this transpose only says so. Elide, stay channel-last.
+                self.elide = True
+                for nop in node_outputs:
+                    layout_dict[nop] = Layout.Channel_Last
+                return
+            if input_is_last and perm == nhwc_to_nchw:
+                # Elide the data movement but record that consumers should read this as channel-first.
+                self.elide = True
+                for nop in node_outputs:
+                    layout_dict[nop] = Layout.Channel_First
+                return
+            raise NotImplementedError(
+                f"Transpose perm={perm} on a "
+                f"{'channel-last' if input_is_last else 'channel-first'} tensor can't be elided, but the "
+                f"target runtime (larod) has no Transpose op. This permutation genuinely reorders data, "
+                f"so it has to be removed upstream in the ONNX export rather than here. Offending node "
+                f"output(s): {list(node_outputs)}")
+
+        for nop in node_outputs:
+            layout_dict[nop] = Layout.Channel_First
+        self.perm_list = perm
+        if input_is_last:
             # LOG.info("Transpose will process tensor after change back to NCHW format.")
             shape_len = len(tensor_grap[node_inputs[0]].shape)
             self.trans_in = [0, shape_len-1] + [n for n in range(1, shape_len-1)]
 
     def __call__(self, inputs):
-        # if self.trans_in:
-        #     inputs = tf.transpose(inputs, perm=self.trans_in)
-        # return tf.transpose(inputs, perm=self.perm_list)
-        ## Remove transpose from network as 
-        return inputs
+        if self.elide:
+            return inputs
+        if self.trans_in:
+            inputs = tf.transpose(inputs, perm=self.trans_in)
+        return tf.transpose(inputs, perm=self.perm_list)
 
 @OPERATOR.register_operator("Slice")
 class TFSlice():
@@ -75,29 +129,42 @@ class TFGather():
 
 @OPERATOR.register_operator("Concat")
 class TFConcat():
+    """ONNX Concat.
+
+    The concat axis in the ONNX graph is stated in CHANNEL-FIRST terms. When the tensors have been
+    materialised channel-last, that axis index has to be remapped -- which is exactly what
+    `dimension_utils.channel_to_last_dimension` does (`1`, the channel axis, becomes `-1`; anything
+    past it shifts down by one). A previous revision hardcoded `_axis = 1` and then re-derived it from
+    each input's rank (`rank == 4 -> last, else 1`); that happens to agree with the remap on the
+    detector graphs it was written for, but it discards `node_attribute['axis']` entirely and so is
+    wrong for any concat on a non-channel axis.
+
+    Under NO_TRANSPOSE all inputs are aligned channel-LAST, because aligning to channel-first means
+    calling tensor_NDC_to_NCD_format, which emits a tf.transpose -- the one thing the Axis path can't
+    have.
+    """
     def __init__(self, tensor_grap, node_weights, node_inputs, node_attribute, node_outputs, layout_dict, *args, **kwargs):
         super().__init__()
-        #TODO can be optimzer by watch after node, if conv to be channel last.
-        self._axis = 1
+        onnx_axis = node_attribute.get('axis', 0)
+
         # use `count` to count how much more for channel-last to channel-first
         count = 0
         for inp in node_inputs:
-            print(f"input {inp}")
             if inp in node_weights:
                 count -= 1
             elif layout_dict[inp] == Layout.Channel_Last:
                 count += 1
             else:
                 count -= 1
+
         self._gather = []
-        if count < 0:
+        if count < 0 and not NO_TRANSPOSE:
             # align to Channel_First
             layout_dict[node_outputs[0]] = Layout.Channel_First
-            
+            self._axis = onnx_axis
             for inp in node_inputs:
                 if inp in tensor_grap:
                     if layout_dict[inp] == Layout.Channel_Last:
-                        self._axis = 2
                         tensor_grap[inp] = dimension_utils.tensor_NDC_to_NCD_format(tensor_grap[inp])
                     self._gather.append(tensor_grap[inp])
                 else:
@@ -105,24 +172,20 @@ class TFConcat():
         else:
             # align to Channel_Last
             layout_dict[node_outputs[0]] = Layout.Channel_Last
-            self._axis = dimension_utils.channel_to_last_dimension(self._axis)
-            prev: Layout = None
+            self._axis = dimension_utils.channel_to_last_dimension(onnx_axis)
             for inp in node_inputs:
                 if inp in tensor_grap:
-                    if prev:
-                        if prev == layout_dict[inp]:
-                            print("Warning: Mismatched input layer format to concat")
-                        else:
-                            prev = layout_dict[inp]
-                        
                     if layout_dict[inp] != Layout.Channel_Last:
+                        if NO_TRANSPOSE:
+                            raise NotImplementedError(
+                                f"Concat input {inp!r} is channel-first while its siblings are "
+                                f"channel-last; aligning them would need a tf.transpose, which the "
+                                f"target runtime (larod) has no op for. Node output(s): "
+                                f"{list(node_outputs)}")
                         tensor_grap[inp] = dimension_utils.tensor_NCD_to_NDC_format(tensor_grap[inp])
-                    if len(tensor_grap[inp].shape) == 4:
-                        self._axis = len(tensor_grap[inp].shape) - 1
-                    else: 
-                        self._axis = 1
                     self._gather.append(tensor_grap[inp])
                 else:
+                    # An initializer -- permuting a constant is free (folded at build time), no runtime op.
                     self._gather.append(dimension_utils.tensor_NCD_to_NDC_format(node_weights[inp]))
 
     def __call__(self, *args, **kwargs):
@@ -133,29 +196,44 @@ class TFReshape():
     def __init__(self, tensor_grap, node_weights, node_inputs, node_attribute, node_outputs, layout_dict, *args, **kwargs):
         super().__init__()
         
-        self.out_shape = node_weights[node_inputs[1]]
-        print(self.out_shape)
-        # fix out_shape to flat size
-        # flat_tensor_size = 1
-        # for i in tensor_grap[node_inputs[0]].shape:
-        #     flat_tensor_size *= i
-        # self.out_shape = (1, flat_tensor_size)
-        # print(f"{tensor_grap[node_inputs[0]].shape} -> {self.out_shape}")
+        onnx_shape = [int(d) for d in node_weights[node_inputs[1]]]
         self.trans_in = None
-        # LOG.info("Reshape will process tensor after change back to NCHW format.")
-        # if layout_dict[node_inputs[0]] == Layout.Channel_Last:
-        #     shape_len = len(tensor_grap[node_inputs[0]].shape)
-        #     self.trans_in = [0, shape_len-1] + [n for n in range(1, shape_len-1)]
-        for nop in node_outputs:
-            layout_dict[nop] = Layout.Channel_Last
-        shape_len = len(self.out_shape)
-        if shape_len == 4:
-            self.out_shape = (1, 2, 2, 18920)
-        else: 
-            self.out_shape = ((self.out_shape[0], self.out_shape[2], self.out_shape[1]))
+
+        if NO_TRANSPOSE:
+            # No transpose is inserted to put the tensor back into NCHW, so the target shape -- which
+            # ONNX states in channel-first terms -- has to be expressed channel-last instead.
+            #
+            # ONNX allows 0 to mean "keep the input's extent at this index", indexed against the
+            # CHANNEL-FIRST input. Resolve those before permuting, or they end up pointing at the wrong
+            # axis. The input tensor is physically channel-last here, so read its ONNX-equivalent shape
+            # back through NDC->NCD to look the extents up.
+            if 0 in onnx_shape:
+                nhwc_in = [None if d is None else int(d) for d in tensor_grap[node_inputs[0]].shape]
+                nchw_in = dimension_utils.shape_NDC_to_NCD_format(nhwc_in)
+                onnx_shape = [nchw_in[i] if d == 0 else d for i, d in enumerate(onnx_shape)]
+
+            if onnx_shape.count(-1) > 1:
+                raise ValueError(f"Reshape target {onnx_shape} has more than one -1; ONNX permits one. "
+                                 f"Node output(s): {list(node_outputs)}")
+
+            # (N, C, D...) -> (N, D..., C). This is the general form of what a previous revision
+            # hardcoded as (1, 2, 2, 18920) for rank 4 and (s0, s2, s1) for rank 3 -- both are exactly
+            # this helper applied to that graph's shapes.
+            self.out_shape = dimension_utils.shape_NCD_to_NDC_format(onnx_shape)
+            for nop in node_outputs:
+                layout_dict[nop] = Layout.Channel_Last
+        else:
+            self.out_shape = tuple(onnx_shape)
+            # LOG.info("Reshape will process tensor after change back to NCHW format.")
+            if layout_dict[node_inputs[0]] == Layout.Channel_Last:
+                shape_len = len(tensor_grap[node_inputs[0]].shape)
+                self.trans_in = [0, shape_len-1] + [n for n in range(1, shape_len-1)]
+            for nop in node_outputs:
+                layout_dict[nop] = Layout.Channel_First
+
     def __call__(self, inputs):
-        # if self.trans_in:
-        #     inputs = tf.transpose(inputs, perm=self.trans_in)
+        if self.trans_in:
+            inputs = tf.transpose(inputs, perm=self.trans_in)
         inputs = tf.reshape(inputs, shape=self.out_shape)
         return inputs
         
